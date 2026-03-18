@@ -19,8 +19,14 @@ log = logging.getLogger("walle")
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 AUTO_POST_CHANNEL_ID = int(os.getenv("AUTO_POST_CHANNEL_ID", "0"))
+
+_raw_channels = os.getenv("AUTO_ANALYZE_CHANNELS", "")
+AUTO_ANALYZE_CHANNELS = [int(c.strip()) for c in _raw_channels.split(",") if c.strip().isdigit()]
+
 EASTERN = ZoneInfo("America/New_York")
 AUTO_POST_TIME_ET = time(9, 0, tzinfo=EASTERN)
+
+SUPPORTED_IMAGE_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"}
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -38,6 +44,74 @@ async def on_ready():
     if not daily_parlay_post.is_running():
         daily_parlay_post.start()
     log.info("Scheduler started — daily post at 9:00 AM ET")
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+
+    image_attachments = [
+        a for a in message.attachments
+        if a.content_type and a.content_type.split(";")[0].strip().lower() in SUPPORTED_IMAGE_TYPES
+    ]
+
+    if image_attachments:
+        if AUTO_ANALYZE_CHANNELS and message.channel.id not in AUTO_ANALYZE_CHANNELS:
+            await bot.process_commands(message)
+            return
+        await _auto_analyze_image(message, image_attachments[0])
+        return
+
+    await bot.process_commands(message)
+
+
+async def _auto_analyze_image(message: discord.Message, attachment: discord.Attachment):
+    from utils.claude_client import analyze_prop_from_image
+    from utils.formatter import format_prop_embed
+
+    try:
+        await message.add_reaction("⏳")
+    except Exception:
+        pass
+
+    async with message.channel.typing():
+        try:
+            media_type = attachment.content_type.split(";")[0].strip().lower()
+            if media_type == "image/jpg":
+                media_type = "image/jpeg"
+
+            image_bytes = await attachment.read()
+            extra_context = message.content.strip() if message.content.strip() else ""
+
+            prop_result = await analyze_prop_from_image(
+                image_bytes, media_type, extra_context=extra_context
+            )
+
+            embed = format_prop_embed(prop_result, username=message.author.name)
+
+            try:
+                await message.remove_reaction("⏳", bot.user)
+                grade = prop_result.get("grade_label", "")
+                reaction = "🔥" if "Elite" in grade else "✅" if "Good" in grade else "⚠️" if "Lean" in grade else "❌"
+                await message.add_reaction(reaction)
+            except Exception:
+                pass
+
+            await message.reply(embed=embed, mention_author=False)
+
+        except Exception as e:
+            log.error(f"Auto-analyze error: {e}", exc_info=True)
+            try:
+                await message.remove_reaction("⏳", bot.user)
+                await message.add_reaction("❌")
+            except Exception:
+                pass
+            await message.reply(
+                "❌ Couldn't analyze that image. Make sure it's a clear prop slip screenshot. "
+                "You can also type any extra context alongside the image (e.g. 'he has a knee issue').",
+                mention_author=False
+            )
 
 
 @bot.event
@@ -62,8 +136,6 @@ async def daily_parlay_post():
             embed = format_parlay_embed(parlay)
             await channel.send(content="🌅 Good morning. Tonight's best props:", embed=embed)
             log.info(f"Daily parlay posted at {datetime.now()}")
-        else:
-            log.warning("Scheduler: daily parlay returned None")
     except Exception as e:
         log.error(f"Scheduler error: {e}", exc_info=True)
 
