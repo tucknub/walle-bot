@@ -37,6 +37,31 @@ SUPPORTED_IMAGE_TYPES = {
 }
 
 
+class SaveView(discord.ui.View):
+    """Adds a Save button to any prop analysis embed."""
+    def __init__(self, prop_result: dict, username: str):
+        super().__init__(timeout=300)
+        self.prop_result = prop_result
+        self.username = username
+        self.db = Database()
+        self.saved = False
+
+    @discord.ui.button(label="Save pick", style=discord.ButtonStyle.secondary, emoji="💾")
+    async def save_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.saved:
+            await interaction.response.send_message("Already saved!", ephemeral=True)
+            return
+        try:
+            pick_id = self.db.save_pick(self.prop_result)
+            self.saved = True
+            button.label = f"Saved — #{pick_id}"
+            button.disabled = True
+            button.style = discord.ButtonStyle.success
+            await interaction.response.edit_message(view=self)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Save failed: {e}", ephemeral=True)
+
+
 class PropsCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -47,15 +72,14 @@ class PropsCog(commands.Cog):
         description="Analyze a player prop — attach a screenshot or type it manually"
     )
     @app_commands.describe(
-        image="Upload a prop slip screenshot (PrizePicks, Underdog, DraftKings, etc.)",
-        player="Player name — only needed if not uploading an image",
-        stat="Stat type — only needed if not uploading an image",
-        line="The line — only needed if not uploading an image",
-        direction="Over or Under — only needed if not uploading an image",
-        opponent="Opponent team abbreviation (e.g. GSW) — optional",
-        book_odds="Book's American odds (e.g. -115 or +105). Defaults to -110.",
-        context="Any extra context: injuries, minutes restrictions, recent news",
-        save="Save this pick to the tracker",
+        image="Attach a prop slip screenshot (PrizePicks, Underdog, DraftKings etc.)",
+        player="Player name — only if not uploading an image",
+        stat="Stat type — only if not uploading an image",
+        line="The line — only if not uploading an image",
+        direction="Over or Under — only if not uploading an image",
+        opponent="Opponent team abbreviation e.g. GSW (optional)",
+        book_odds="Book's American odds e.g. -115 or +105. Defaults to -110.",
+        context="Extra context: injuries, minutes restrictions, recent news",
     )
     @app_commands.choices(stat=STAT_CHOICES, direction=DIRECTION_CHOICES)
     async def prop(
@@ -69,14 +93,12 @@ class PropsCog(commands.Cog):
         opponent: str = "",
         book_odds: int = -110,
         context: str = "",
-        save: bool = False,
     ):
         await interaction.response.defer(thinking=True)
 
         try:
             prop_result = None
 
-            # Path 1: Image uploaded — send to Claude vision
             if image:
                 content_type = image.content_type or "image/png"
                 media_type = SUPPORTED_IMAGE_TYPES.get(content_type.split(";")[0].strip())
@@ -89,7 +111,6 @@ class PropsCog(commands.Cog):
                 image_bytes = await image.read()
                 prop_result = await analyze_prop_from_image(image_bytes, media_type, extra_context=context)
 
-            # Path 2: Manual text entry
             elif player and stat and line is not None and direction:
                 prop_result = await analyze_prop_from_text(
                     player=player,
@@ -100,33 +121,22 @@ class PropsCog(commands.Cog):
                     book_odds=book_odds,
                     extra_context=context,
                 )
-
             else:
                 await interaction.followup.send(
-                    "❌ Please either attach a prop slip screenshot, or fill in the `player`, `stat`, `line`, and `direction` fields manually.",
+                    "❌ Attach a prop slip screenshot, or fill in `player`, `stat`, `line`, and `direction` manually.",
                     ephemeral=True
                 )
                 return
 
-            pick_id = None
-            if save and prop_result:
-                try:
-                    pick_id = self.db.save_pick({
-                        **prop_result,
-                        "platform": prop_result.get("platform", ""),
-                    })
-                except Exception as e:
-                    log.error(f"DB save failed: {e}")
-                    # Don't crash — just note it in the embed
-
             username = interaction.user.name
-            embed = format_prop_embed(prop_result, pick_id=pick_id, username=username)
-            await interaction.followup.send(embed=embed)
+            embed = format_prop_embed(prop_result, username=username)
+            view = SaveView(prop_result, username)
+            await interaction.followup.send(embed=embed, view=view)
 
         except Exception as e:
             log.error(f"Prop command error: {e}", exc_info=True)
             await interaction.followup.send(
-                f"❌ Error analyzing prop: `{e}`\nPlease try again. If the issue persists, check that your `ANTHROPIC_API_KEY` is set correctly."
+                f"❌ Error analyzing prop: `{e}`"
             )
 
 
