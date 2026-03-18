@@ -84,21 +84,32 @@ async def _auto_analyze_image(message: discord.Message, attachment: discord.Atta
             image_bytes = await attachment.read()
             extra_context = message.content.strip() if message.content.strip() else ""
 
-            prop_result = await analyze_prop_from_image(
-                image_bytes, media_type, extra_context=extra_context
-            )
+            result = await analyze_prop_from_image(image_bytes, media_type, extra_context=extra_context)
 
-            embed = format_prop_embed(prop_result, username=message.author.name)
+            # Handle both single prop (dict) and multi-prop (list) responses
+            props = result if isinstance(result, list) else [result]
 
             try:
                 await message.remove_reaction("⏳", bot.user)
-                grade = prop_result.get("grade_label", "")
-                reaction = "🔥" if "Elite" in grade else "✅" if "Good" in grade else "⚠️" if "Lean" in grade else "❌"
-                await message.add_reaction(reaction)
+                # React based on best grade in the slip
+                grades = [p.get("grade_label", "") for p in props]
+                if any("Elite" in g for g in grades):
+                    await message.add_reaction("🔥")
+                elif any("Good" in g for g in grades):
+                    await message.add_reaction("✅")
+                elif any("Lean" in g for g in grades):
+                    await message.add_reaction("⚠️")
+                else:
+                    await message.add_reaction("❌")
             except Exception:
                 pass
 
-            await message.reply(embed=embed, mention_author=False)
+            # Send one embed per prop
+            for prop in props:
+                embed = format_prop_embed(prop, username=message.author.name)
+                from cogs.props import SaveView
+                view = SaveView(prop, message.author.name)
+                await message.reply(embed=embed, view=view, mention_author=False)
 
         except Exception as e:
             log.error(f"Auto-analyze error: {e}", exc_info=True)
@@ -108,8 +119,9 @@ async def _auto_analyze_image(message: discord.Message, attachment: discord.Atta
             except Exception:
                 pass
             await message.reply(
-                "❌ Couldn't analyze that image. Make sure it's a clear prop slip screenshot. "
-                "You can also type any extra context alongside the image (e.g. 'he has a knee issue').",
+                f"❌ Couldn't analyze that image: `{e}`\n"
+                "Make sure it's a clear prop slip screenshot. "
+                "You can also type context alongside the image (e.g. 'he has a knee issue').",
                 mention_author=False
             )
 
